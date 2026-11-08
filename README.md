@@ -16,21 +16,9 @@ Mission 2 of my self-healing series. [Mission 1](https://github.com/Gokul36115/s
 - **Everything as code:** Helm chart, Argo CD applications, Prometheus rules and the Grafana dashboard all live in this repo.
 
 ## Architecture
+![Architecture](docs/architecture.png)
 
-    Developer ──git push──▶ GitHub ──▶ GitHub Actions
-                                         │ test → build → smoke test → push ghcr.io
-    Engineer ──./scripts/release.sh──▶ new image tag committed to charts/selfheal/values.yaml
-                                                         │
-                      Argo CD (watches Git) ◀────────────┘
-                         │ sync + self-heal
-             ┌───────────┴─────────────────────────────┐
-             ▼                                         ▼
-     namespace: selfheal                       namespace: monitoring
-     Deployment (2-5 pods, probes)             kube-prometheus-stack
-     Service · HPA · PDB                        Prometheus ── scrapes ──▶ /actuator/prometheus
-     ServiceMonitor · PrometheusRule            Alertmanager (SLO burn-rate alerts)
-     Grafana dashboard (ConfigMap)              Grafana ("Selfheal · SLO & Self-Healing")
-             └──────────── k3s single-node cluster (Ubuntu VM) ────────────┘
+**Flow:** ① push → ② CI tests, lints the chart and builds the image → ③ image pushed to ghcr.io → ④ a reviewed `release.sh` commits the new tag → ⑤ Argo CD pulls Git → ⑥ Helm renders the app → ⑦ Prometheus scrapes metrics, Alertmanager evaluates SLO alerts, Grafana shows them.
 
 ## Tech stack
 | Area | Tools |
@@ -63,6 +51,10 @@ Mission 2 of my self-healing series. [Mission 1](https://github.com/Gokul36115/s
 │   ├── chaos.sh                 break things on purpose and watch them heal
 │   ├── load.sh                  generate load to trigger autoscaling
 │   └── release.sh               promote a CI-built image via Git (reviewed GitOps release)
+├── docs/
+│   ├── architecture.png
+│   ├── errors.md                real problems, root causes, fixes
+│   └── screenshots/             evidence from the live run
 └── .github/workflows/ci.yml     test → lint → build → push → smoke test (read-only on the repo)
 ```
 
@@ -102,8 +94,54 @@ git clone https://github.com/Gokul36115/<this-repo>.git && cd <this-repo>
 | Grafana | `http://<vm-ip>:30300` (dashboard "Selfheal · SLO & Self-Healing") |
 | Argo CD | `https://<vm-ip>:30443` |
 
-## Results
-_Filled in from the live run: chaos test availability, restart counts, autoscaling timeline and screenshots._
+## Results (live run)
+
+### Platform up
+| Cluster: every pod Running across 4 namespaces | App resources: Deployment 2/2, HPA 2–5, PDB, NodePort |
+|---|---|
+| ![Cluster](docs/screenshots/01-cluster.png) | ![Selfheal resources](docs/screenshots/02-selfheal-resources.png) |
+
+### GitOps: Argo CD deploys from Git
+Both applications **Healthy + Synced**. The resource tree shows everything the Helm chart created; the header shows the deployed commit and its author.
+
+![Argo CD applications](docs/screenshots/03-argocd-apps.png)
+![Argo CD resource tree](docs/screenshots/04-argocd-tree.png)
+
+### CI: test → chart → image (read-only on the repo)
+![CI pipeline](docs/screenshots/05-ci-pipeline.png)
+![CI image summary](docs/screenshots/06-ci-image.png)
+
+### Self-healing under chaos
+Baseline: 100% availability, 2 ready pods, 0 restarts, 0 alerts.
+![Before chaos](docs/screenshots/07-grafana-before.png)
+
+Then I deleted pods, crashed the JVM (`/api/crash`) and forced `OutOfMemoryError`s (`/api/memory`, JVM exits with code 3):
+
+| Moment | Ready pods | Self-heals (restarts) | Firing alerts | What happened |
+|---|---|---|---|---|
+| Baseline | 2 | 0 | 0 | Healthy |
+| First crash | 2 | 1 | 0 | Container restarted automatically |
+| JVM restarts | 4 | 3 | 2 | Start-up CPU spike made the HPA scale **2 → 5** |
+| Peak of chaos | 1 | 4 | 3 | Restart alerts firing; one replica kept serving |
+| Recovered | 2 | 4 | 3 | Back to 2 pods, no manual action |
+
+![First self-heal](docs/screenshots/08-chaos-first-heal.png)
+![Scale-out and alerts](docs/screenshots/09-chaos-scaleout-alerts.png)
+![Pod dip](docs/screenshots/10-chaos-pod-dip.png)
+![Recovered](docs/screenshots/11-chaos-recovered.png)
+
+**Takeaways**
+- Every failure was recovered by Kubernetes with **zero manual steps**, and the restart alerts fired as designed.
+- The availability SLI stayed at 100% because it counts **HTTP 5xx from the app**. Requests that hit a crashing pod fail at the connection level, which the app can't see, so `scripts/chaos.sh` measures availability from the client side as well.
+- The unexpected HPA scale-out during JVM restarts is documented in [docs/errors.md](docs/errors.md#5-observation-hpa-scaled-out-during-chaos-testing-without-real-load).
+
+## Problems faced and fixes
+Real issues, with root cause and fix, are in [docs/errors.md](docs/errors.md):
+- VM too small → resized and grew the disk online (`growpart` + `resize2fs`)
+- `permission_denied: write_package` on ghcr.io → per-package Actions access
+- Grafana `CrashLoopBackOff` → `OOMKilled (137)` → limit raised **through a Git commit** (GitOps)
+- CI made read-only (`contents: read`) so promotion is a reviewed human step
+- HPA scaling on JVM start-up CPU (observation and tuning options)
 
 ## Roadmap
 - [ ] Phase 2: Ingress with automatic TLS (cert-manager) and SSO login (OIDC via Keycloak) for Grafana and Argo CD
