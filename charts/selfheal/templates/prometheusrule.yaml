@@ -1,0 +1,73 @@
+{{- if .Values.monitoring.enabled }}
+{{- $budget := printf "%.4f" (subf 1.0 .Values.slo.availabilityTarget) }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "selfheal.name" . }}
+  labels: {{- include "selfheal.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  groups:
+    # ---------- SLIs: error ratio over several windows ----------
+    - name: selfheal.sli
+      interval: 30s
+      rules:
+        {{- range $w := list "5m" "30m" "1h" "6h" }}
+        - record: selfheal:error_ratio:rate{{ $w }}
+          expr: |
+            sum(rate(http_server_requests_seconds_count{namespace="{{ $.Release.Namespace }}",status=~"5.."}[{{ $w }}]))
+            /
+            clamp_min(sum(rate(http_server_requests_seconds_count{namespace="{{ $.Release.Namespace }}"}[{{ $w }}])), 1e-9)
+        {{- end }}
+    # ---------- SLO burn-rate alerts (multi-window, Google SRE workbook style) ----------
+    - name: selfheal.slo
+      rules:
+        - alert: SelfhealErrorBudgetFastBurn
+          expr: |
+            selfheal:error_ratio:rate1h > (14.4 * {{ $budget }})
+            and
+            selfheal:error_ratio:rate5m > (14.4 * {{ $budget }})
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: "selfheal is burning its error budget ~14x too fast"
+            description: "At this rate the 30-day error budget is gone in about 2 days."
+        - alert: SelfhealErrorBudgetSlowBurn
+          expr: |
+            selfheal:error_ratio:rate6h > (6 * {{ $budget }})
+            and
+            selfheal:error_ratio:rate30m > (6 * {{ $budget }})
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "selfheal is steadily burning its error budget"
+    # ---------- Self-healing signals ----------
+    - name: selfheal.health
+      rules:
+        - alert: SelfhealPodRestarted
+          expr: increase(kube_pod_container_status_restarts_total{namespace="{{ .Release.Namespace }}",container="app"}[10m]) > 0
+          labels: { severity: info }
+          annotations:
+            summary: {{`"Pod {{ $labels.pod }} restarted (Kubernetes self-healed it)"`}}
+        - alert: SelfhealCrashLooping
+          expr: increase(kube_pod_container_status_restarts_total{namespace="{{ .Release.Namespace }}",container="app"}[15m]) > 3
+          labels: { severity: critical }
+          annotations:
+            summary: {{`"Pod {{ $labels.pod }} is crash-looping: self-healing is not enough"`}}
+        - alert: SelfhealHeapHigh
+          expr: |
+            sum by (pod) (jvm_memory_used_bytes{namespace="{{ .Release.Namespace }}",area="heap"})
+            /
+            sum by (pod) (jvm_memory_max_bytes{namespace="{{ .Release.Namespace }}",area="heap"} > 0) > 0.9
+          for: 1m
+          labels: { severity: warning }
+          annotations:
+            summary: {{`"JVM heap above 90% on {{ $labels.pod }}: OOM likely soon"`}}
+        - alert: SelfhealNoReadyPods
+          expr: kube_deployment_status_replicas_available{namespace="{{ .Release.Namespace }}",deployment="selfheal"} < 1
+          for: 1m
+          labels: { severity: critical }
+          annotations:
+            summary: "No ready selfheal pods: users are seeing errors"
+{{- end }}

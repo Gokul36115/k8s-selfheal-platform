@@ -1,0 +1,38 @@
+# Image is built and imported by scripts/bootstrap.sh for the first run.
+# The CI pipeline (.github/workflows/ci.yml) later switches this to GHCR with a commit-SHA tag.
+image:
+  repository: selfheal-app
+  tag: local
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+service:
+  type: NodePort
+  port: 8080
+  nodePort: 30080
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 384Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 60
+
+podDisruptionBudget:
+  minAvailable: 1
+
+# SLO: 99.5% of requests succeed (non-5xx) over 30 days
+slo:
+  availabilityTarget: 0.995
+
+monitoring:
+  enabled: true            # ServiceMonitor + PrometheusRule (needs kube-prometheus-stack CRDs)
+  dashboard: true          # Grafana dashboard ConfigMap (picked up by the Grafana sidecar)

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: selfheal
+description: Self-healing Spring Boot service with probes, autoscaling, SLO alerts and a Grafana dashboard
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

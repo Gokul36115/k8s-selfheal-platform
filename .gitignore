@@ -1,0 +1,5 @@
+# build output
+app/target/
+# local kube config / secrets never go to Git
+*.kubeconfig
+.env
