@@ -36,8 +36,8 @@ grafana:
       label: grafana_dashboard
       searchNamespace: ALL     # load the selfheal dashboard ConfigMap from the app namespace
   resources:
-    requests: { cpu: 50m, memory: 128Mi }
-    limits:   { memory: 256Mi }
+    requests: { cpu: 50m, memory: 256Mi }
+    limits:   { memory: 768Mi }
 
 kube-state-metrics:
   resources:
